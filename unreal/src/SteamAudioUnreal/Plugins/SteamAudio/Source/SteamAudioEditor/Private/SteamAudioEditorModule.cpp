@@ -53,6 +53,9 @@
 #include "SteamAudioSpatializationSettingsFactory.h"
 #include "SteamAudioStaticMeshActor.h"
 #include "TickableNotification.h"
+#if ((ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 0) || (ENGINE_MAJOR_VERSION > 5))
+#include <LevelInstance/LevelInstanceSubsystem.h>
+#endif
 
 DEFINE_LOG_CATEGORY(LogSteamAudioEditor);
 
@@ -158,6 +161,12 @@ void FSteamAudioEditorModule::StartupModule()
 
                     MenuBuilder.BeginSection("GeometryTagging", NSLOCTEXT("SteamAudio", "MenuGeometryTagging", "Geometry Tagging"));
                     MenuBuilder.AddMenuEntry(
+                        NSLOCTEXT("SteamAudio", "MenuAddAllActors", "Select All Actors with Geometry Component"),
+                        NSLOCTEXT("SteamAudio", "MenuAddAllActorsTooltip", "Allows to select all actors that contain a Geometry Component."),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateRaw(this, &FSteamAudioEditorModule::OnSelectActorsWithGeometryComponent))
+                    );
+                    MenuBuilder.AddMenuEntry(
                         NSLOCTEXT("SteamAudio", "MenuAddAllActors", "Add Geometry Component to all Actors"),
                         NSLOCTEXT("SteamAudio", "MenuAddAllActorsTooltip", "Add the Steam Audio Geometry component to all actors with static geometry."),
                         FSlateIcon(),
@@ -261,14 +270,31 @@ void FSteamAudioEditorModule::RegisterComponentVisualizer(FName ComponentClassNa
     }
 }
 
+void FSteamAudioEditorModule::OnSelectActorsWithGeometryComponent()
+{
+    UWorld* World = GEditor->GetLevelViewportClients()[0]->GetWorld();
+
+    GEditor->SelectNone(false, true);
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        if (It->FindComponentByClass<USteamAudioGeometryComponent>())
+        {
+            GEditor->SelectActor(*It, true, false);
+        }
+    }
+}
+
 void FSteamAudioEditorModule::OnAddGeometryComponentToStaticMeshes()
 {
     UWorld* World = GEditor->GetLevelViewportClients()[0]->GetWorld();
 
+    TArray<AActor*> TargetActors;
+    
     for (TActorIterator<AActor> It(World); It; ++It)
     {
+        AActor* Actor = *It;
         TArray<UStaticMeshComponent*> StaticMeshComponents;
-        It->GetComponents<UStaticMeshComponent>(StaticMeshComponents);
+        Actor->GetComponents<UStaticMeshComponent>(StaticMeshComponents);
 
         bool bCanAffectAudio = false;
         for (UStaticMeshComponent* StaticMeshComponent : StaticMeshComponents)
@@ -280,16 +306,29 @@ void FSteamAudioEditorModule::OnAddGeometryComponentToStaticMeshes()
                 break;
             }
         }
-
-        if (bCanAffectAudio)
+        
+        // Also check if we already have a component geometry component
+        if (bCanAffectAudio && !Actor->FindComponentByClass<USteamAudioGeometryComponent>())
         {
-            USteamAudioGeometryComponent* GeometryComponent = It->FindComponentByClass<USteamAudioGeometryComponent>();
-            if (!GeometryComponent)
-            {
-                GeometryComponent = NewObject<USteamAudioGeometryComponent>(*It);
-                GeometryComponent->RegisterComponent();
-                It->AddInstanceComponent(GeometryComponent);
-            }
+            TargetActors.Add(Actor);
+        }
+    }
+    
+    if (TargetActors.Num() > 0)
+    {
+        const FScopedTransaction Transaction(FText::Format(
+            NSLOCTEXT("SteamAudio", "AddGeometry", "Add Steam Audio Geometry to {0} Actors"), 
+            FText::AsNumber(TargetActors.Num())
+        ));
+        
+        for (AActor* TargetActor : TargetActors)
+        {
+            TargetActor->Modify();
+            USteamAudioGeometryComponent* GeometryComponent = NewObject<USteamAudioGeometryComponent>(TargetActor, USteamAudioGeometryComponent::StaticClass(), NAME_None, RF_Transactional);
+            GeometryComponent->RegisterComponent();
+            TargetActor->AddInstanceComponent(GeometryComponent);
+            TargetActor->MarkPackageDirty();
+            TargetActor->PostEditChange();
         }
     }
 }
@@ -298,11 +337,43 @@ void FSteamAudioEditorModule::OnRemoveGeometryComponentFromStaticMeshes()
 {
     UWorld* World = GEditor->GetLevelViewportClients()[0]->GetWorld();
 
-    for (TObjectIterator<USteamAudioGeometryComponent> It; It; ++It)
+    TArray<AActor*> TargetActors;
+    
+    for (TActorIterator<AActor> It(World); It; ++It)
     {
-        if (It && It->IsValidLowLevel() && It->GetWorld() == World)
+        // If the actor has a geometry component, we're going to modify it
+        if (It->FindComponentByClass<USteamAudioGeometryComponent>())
         {
-            It->DestroyComponent();
+            TargetActors.Add(*It);
+        }
+    }
+    
+    if (TargetActors.Num() > 0)
+    {
+        const FScopedTransaction Transaction(FText::Format(
+            NSLOCTEXT("SteamAudio", "RemoveGeometry", "Remove Steam Audio Geometry from {0} Actors"), 
+            FText::AsNumber(TargetActors.Num())
+        ));
+        
+        for (AActor* TargetActor : TargetActors)
+        {
+            TargetActor->Modify();
+            
+            TArray<USteamAudioGeometryComponent*> GeometryComponents;
+            TargetActor->GetComponents<USteamAudioGeometryComponent>(GeometryComponents);
+
+            for (USteamAudioGeometryComponent* GeometryComponent : GeometryComponents)
+            {
+                if (GeometryComponent && GeometryComponent->IsValidLowLevel() && GeometryComponent->GetWorld() == World)
+                {
+                    GeometryComponent->Modify();
+                    GeometryComponent->DestroyComponent();
+                    TargetActor->RemoveInstanceComponent(GeometryComponent);
+                }
+            }
+            
+            TargetActor->MarkPackageDirty();
+            TargetActor->PostEditChange();
         }
     }
 }
@@ -353,7 +424,7 @@ void FSteamAudioEditorModule::OnExportDynamicObjects()
         if (!It->Asset.IsAsset())
             continue;
 
-        if (!It->GetOwner()->GetInstanceComponents().Contains(Cast<UActorComponent>(*It)))
+        if (!It->GetOwner()->IsChildActor() && !It->GetOwner()->GetInstanceComponents().Contains(Cast<UActorComponent>(*It)))
             continue;
 
         DynamicObjects.Add(*It);
@@ -415,7 +486,7 @@ void FSteamAudioEditorModule::OnExportDynamicObjectsCurrentLevel()
         if (!It->Asset.IsAsset())
             continue;
 
-        if (!It->GetOwner()->GetInstanceComponents().Contains(Cast<UActorComponent>(*It)))
+        if (!It->GetOwner()->IsChildActor() && !It->GetOwner()->GetInstanceComponents().Contains(Cast<UActorComponent>(*It)))
             continue;
 
         DynamicObjects.Add(*It);
@@ -486,8 +557,37 @@ void FSteamAudioEditorModule::ExportSingleLevel(UWorld* World, ULevel* Level, bo
     }
 }
 
+bool FSteamAudioEditorModule::CurrentlyEditingInstancedLevel(UWorld* World)
+{
+#if ((ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 0) || (ENGINE_MAJOR_VERSION > 5))
+    if (!World)
+        return false;
+
+    ULevel* Level = World->GetCurrentLevel();
+    if (!Level)
+        return false;
+
+    ULevelInstanceSubsystem* LevelInstanceSubsystem = World->GetSubsystem<ULevelInstanceSubsystem>();
+    if (!LevelInstanceSubsystem)
+        return false;
+
+    return (LevelInstanceSubsystem->GetEditingLevelInstance() != nullptr);
+#else
+    return false;
+#endif
+}
+
 void FSteamAudioEditorModule::ExportAllLevels(UWorld* World, bool bExportOBJ)
 {
+#if ((ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 0) || (ENGINE_MAJOR_VERSION > 5))
+    // if we are currently editing an instanced level, just export that level
+    if (CurrentlyEditingInstancedLevel(World))
+    {
+        ExportSingleLevel(World, World->GetCurrentLevel(), bExportOBJ);
+        return;
+    }
+#endif
+
     TMap<ULevel*, FString> Names;
     PromptForAllLevelNames(World, bExportOBJ, Names);
 
@@ -501,6 +601,12 @@ void FSteamAudioEditorModule::ExportAllLevels(UWorld* World, bool bExportOBJ)
 
             for (ULevel* Level : World->GetLevels())
             {
+#if ((ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 0) || (ENGINE_MAJOR_VERSION > 5))
+                // skip instanced levels
+                if (Level->IsInstancedLevel())
+                    continue;
+#endif
+
                 FString LevelName;
                 Level->GetOutermostObject()->GetName(LevelName);
 
@@ -603,6 +709,12 @@ void FSteamAudioEditorModule::PromptForAllLevelNames(UWorld* World, bool bExport
 {
     for (ULevel* Level : World->GetLevels())
     {
+#if ((ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 0) || (ENGINE_MAJOR_VERSION > 5))
+        // skip instanced levels
+        if (Level->IsInstancedLevel())
+            continue;
+#endif
+
         if (DoesLevelHaveStaticGeometryForExport(World, Level))
         {
             FString Name;

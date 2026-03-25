@@ -27,6 +27,7 @@ Functions
 .. doxygenfunction:: iplStaticMeshSave
 .. doxygenfunction:: iplStaticMeshAdd
 .. doxygenfunction:: iplStaticMeshRemove
+.. doxygenfunction:: iplStaticMeshSetMaterial
 .. doxygenfunction:: iplInstancedMeshCreate
 .. doxygenfunction:: iplInstancedMeshRetain
 .. doxygenfunction:: iplInstancedMeshRelease

@@ -18,9 +18,11 @@
 
 #if defined(IPL_OS_MACOSX)
 #include <mach-o/dyld.h>
+#elif defined(IPL_OS_LINUX)
+#include <unistd.h>
 #endif
 
-#if defined(IPL_OS_IOS)
+#if defined(IPL_OS_IOS) || defined(IPL_OS_WASM)
 #define STEAMAUDIO_SKIP_API_FUNCTIONS
 #endif
 #include <phonon_interfaces.h>
@@ -42,6 +44,7 @@ std::atomic<bool> gNewHRTFWritten{ false };
 std::atomic<bool> gIsSimulationSettingsValid{ false };
 std::atomic<bool> gNewReverbSourceWritten{ false };
 std::atomic<bool> gNewReflectionMixerWritten{ false };
+std::atomic<bool> gHRTFDisabled{ false };
 
 std::shared_ptr<SourceManager> gSourceManager;
 
@@ -171,6 +174,19 @@ bool isRunningInEditor()
     uint32_t bufferSize = 1024;
     _NSGetExecutablePath(moduleFileName, &bufferSize);
     return (strstr(moduleFileName, "FMOD Studio.app") != nullptr);
+#elif defined(IPL_OS_LINUX)
+    char moduleFileName[1024] = {0};
+    readlink("/proc/self/exe", moduleFileName, 1024);
+
+    auto baseName = strrchr(moduleFileName, '/');
+    if (!baseName)
+        return false;
+
+    baseName++;
+
+    return (strstr(baseName, "fmodstudio") != nullptr);
+#else
+    return false;
 #endif
 }
 
@@ -195,6 +211,89 @@ void initContextAndDefaultHRTF(IPLAudioSettings audioSettings)
 
     iplHRTFRelease(&hrtf);
     iplContextRelease(&context);
+}
+
+bool initFmodOutBufferFormat(const FMOD_DSP_BUFFER_ARRAY* inBuffers, 
+                             FMOD_DSP_BUFFER_ARRAY* outBuffers,
+                             FMOD_DSP_STATE* state,
+                             ParameterSpeakerFormatType outputFormat)
+{
+	if (!inBuffers || !outBuffers || !state || !state->functions)
+	{
+		return false;
+	}
+    
+    // platforms speaker mode
+    FMOD_SPEAKERMODE mixerMode = {};
+    // final speaker mode
+    FMOD_SPEAKERMODE outputMode = {};
+    state->functions->getspeakermode(state, &mixerMode, &outputMode);
+
+	int bufferNumChannels = 0;
+	FMOD_CHANNELMASK bufferChannelMask;
+    FMOD_SPEAKERMODE outputSpeakerMode = {};
+    
+    switch (outputFormat) {
+        case PARAMETER_FROM_MIXER:
+            outputSpeakerMode = mixerMode;
+            break;
+        case PARAMETER_FROM_FINAL_OUTPUT:
+            outputSpeakerMode = outputMode;
+            break;
+        case PARAMETER_FROM_INPUT:
+            outputSpeakerMode = inBuffers->speakermode;
+            break;
+        default:
+            // Missing switch case
+            return false;
+    }
+
+	switch (outputSpeakerMode)
+	{
+	case FMOD_SPEAKERMODE_MONO:
+		bufferNumChannels = 1;
+		bufferChannelMask = FMOD_CHANNELMASK_MONO;
+		break;
+	case FMOD_SPEAKERMODE_STEREO:
+		bufferNumChannels = 2;
+		bufferChannelMask = FMOD_CHANNELMASK_STEREO;
+		break;
+	case FMOD_SPEAKERMODE_QUAD:
+		bufferNumChannels = 4;
+		bufferChannelMask = FMOD_CHANNELMASK_QUAD;
+		break;
+	case FMOD_SPEAKERMODE_SURROUND:
+		bufferNumChannels = 5;
+		bufferChannelMask = FMOD_CHANNELMASK_SURROUND;
+		break;
+	case FMOD_SPEAKERMODE_5POINT1:
+		bufferNumChannels = 6;
+		bufferChannelMask = FMOD_CHANNELMASK_5POINT1;
+		break;
+	case FMOD_SPEAKERMODE_7POINT1:
+		bufferNumChannels = 8;
+		bufferChannelMask = FMOD_CHANNELMASK_7POINT1;
+		break;
+	case FMOD_SPEAKERMODE_7POINT1POINT4:
+		bufferNumChannels = 8;
+		bufferChannelMask = FMOD_CHANNELMASK_7POINT1;
+		outputSpeakerMode = FMOD_SPEAKERMODE_7POINT1;
+		break;
+	default:
+		// Unsupported output format, prevent processing
+		return false;
+	}
+
+	for (size_t i = 0; i < outBuffers->numbuffers; i++)
+	{
+		outBuffers->buffernumchannels[i] = bufferNumChannels;
+		outBuffers->bufferchannelmask[i] = bufferChannelMask;
+	}
+
+	// Accept the input format by setting the output format to what the plugin can support for that input format
+	outBuffers->speakermode = outputSpeakerMode;
+
+	return true;
 }
 
 
@@ -428,4 +527,9 @@ void F_CALL iplFMODRemoveSource(IPLint32 handle)
         return;
 
     gSourceManager->removeSource(handle);
+}
+
+void F_CALL iplFMODSetHRTFDisabled(bool disabled)
+{
+    gHRTFDisabled = disabled;
 }

@@ -22,7 +22,7 @@
 
 #if !defined(IPL_OS_UNSUPPORTED)
 
-#if defined(IPL_OS_IOS)
+#if defined(IPL_OS_IOS) || defined(IPL_OS_WASM)
 #define STEAMAUDIO_SKIP_API_FUNCTIONS
 #endif
 #include <phonon_interfaces.h>
@@ -45,6 +45,7 @@ std::atomic<bool> gNewPerspectiveCorrectionWritten{ false };
 std::atomic<bool> gIsSimulationSettingsValid{ false };
 std::atomic<bool> gNewReverbSourceWritten{ false };
 std::atomic<bool> gNewReflectionMixerWritten{ false };
+std::atomic<bool> gHRTFDisabled{ false };
 
 std::shared_ptr<SourceManager> gSourceManager;
 
@@ -93,7 +94,7 @@ void UNITY_AUDIODSP_CALLBACK iplUnityGetVersion(unsigned int* major, unsigned in
 
 void UNITY_AUDIODSP_CALLBACK iplUnityInitialize(IPLContext context)
 {
-    assert(gContext == nullptr);
+    assert(SteamAudioUnity::gContext == nullptr);
 
     SteamAudioUnity::gContext = iplContextRetain(context);
 
@@ -181,6 +182,11 @@ void UNITY_AUDIODSP_CALLBACK iplUnityRemoveSource(IPLint32 handle)
         return;
 
     SteamAudioUnity::gSourceManager->removeSource(handle);
+}
+
+void UNITY_AUDIODSP_CALLBACK iplUnitySetHRTFDisabled(bool disabled)
+{
+    SteamAudioUnity::gHRTFDisabled = disabled;
 }
 
 
